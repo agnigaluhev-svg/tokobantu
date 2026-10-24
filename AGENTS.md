@@ -9,7 +9,7 @@ bisa ditangani dieskalasi ke staf manusia lewat tiket.
 ## Tech stack
 - Python 3.13, FastAPI, uvicorn
 - httpx untuk memanggil Shopify Admin GraphQL API
-- anthropic SDK (Claude API) dengan tool calling
+- google-genai (Gemini API) dengan tool calling
 - python-dotenv untuk membaca rahasia dari .env
 - SQLite saat development (percakapan dan tiket)
 - Virtual environment ada di .venv
