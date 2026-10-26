@@ -50,7 +50,7 @@ def get_default_client() -> genai.Client:
     """Create a default Gemini client using environment variables.
 
     Returns:
-        Configured genai.Client instance.
+        Configured genai.Client instance with 30s (30,000ms) HTTP timeout.
 
     Raises:
         ValueError: If GEMINI_API_KEY is not set or empty.
@@ -58,7 +58,9 @@ def get_default_client() -> genai.Client:
     api_key = os.getenv("GEMINI_API_KEY", "").strip()
     if not api_key:
         raise ValueError("GEMINI_API_KEY environment variable is missing or empty.")
-    return genai.Client(api_key=api_key)
+    # 30 seconds = 30000 milliseconds according to SDK HttpOptions description
+    http_opts = types.HttpOptions(timeout=30000)
+    return genai.Client(api_key=api_key, http_options=http_opts)
 
 
 def _log_tool_call(
@@ -151,12 +153,16 @@ def _is_transient_error(exc: Exception) -> bool:
     Returns:
         True if the error is temporary (503, 429, timeout), False otherwise.
     """
+    if isinstance(exc, TimeoutError):
+        return True
+
     msg = str(exc).lower()
     transient_indicators = [
         "503",
         "429",
         "timeout",
         "timed out",
+        "time out",
         "deadline",
         "unavailable",
         "resource exhausted",
@@ -205,6 +211,7 @@ def _call_model_with_retry(
         except Exception as exc:
             if not _is_transient_error(exc) or attempt_idx == attempts - 1:
                 raise
+            print("[mencoba lagi...]")
             delay = retry_delays[attempt_idx]
             if delay > 0:
                 time.sleep(delay)
@@ -251,12 +258,14 @@ def run_agent(
     active_client = client if client is not None else get_default_client()
     model_name = os.getenv("GEMINI_MODEL", "gemini-3.8-flash").strip()
 
-    # 3. Configure tools and disable automatic function calling for manual loop
+    # 3. Configure tools, timeout (30s = 30000ms), and low thinking level
     tools_list = list(TOOL_FUNCTIONS.values())
     config = types.GenerateContentConfig(
         system_instruction=SYSTEM_PROMPT,
         tools=tools_list,
         automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
+        http_options=types.HttpOptions(timeout=30000),
+        thinking_config=types.ThinkingConfig(thinking_level=types.ThinkingLevel.LOW),
     )
 
     # 4. Prepare contents structure

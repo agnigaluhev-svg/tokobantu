@@ -8,6 +8,8 @@ Tests agent logic completely offline using mock responses (no internet or real A
 (e) 503 error twice then success (recovers via retry)
 (f) Continuous 503 error (exhausts retries and returns polite apology)
 (g) Empty message and message > 1000 characters rejected
+(h) Timeout twice then success (recovers via retry)
+(i) Continuous timeout (exhausts retries and returns polite apology)
 
 Never prints any secrets or tokens.
 """
@@ -103,7 +105,7 @@ def main() -> None:
     print()
 
     total_passed = 0
-    total_tests = 7
+    total_tests = 9
     fast_retries = (0.0, 0.0, 0.0)
 
     # (a) Model langsung menjawab teks
@@ -282,6 +284,49 @@ def main() -> None:
     )
     print_case_result("g", "Pesan kosong dan > 1000 karakter ditolak", passed_g, detail_g)
     if passed_g:
+        total_passed += 1
+
+    # (h) Timeout dua kali lalu berhasil, harus lolos lewat retry
+    fake_client_h = FakeClient([
+        TimeoutError("Request timed out after 30000ms"),
+        TimeoutError("Request timed out after 30000ms"),
+        FakeResponse(text="Halo, berhasil setelah timeout pulih."),
+    ])
+    res_h = run_agent(
+        history=[],
+        user_message="Halo",
+        client=fake_client_h,
+        retry_delays=fast_retries,
+    )
+    passed_h = (
+        fake_client_h.models.call_count == 3
+        and res_h.get("reply") == "Halo, berhasil setelah timeout pulih."
+    )
+    detail_h = f"attempts={fake_client_h.models.call_count}, reply={res_h.get('reply')!r}"
+    print_case_result("h", "Timeout dua kali lalu berhasil (retry backoff)", passed_h, detail_h)
+    if passed_h:
+        total_passed += 1
+
+    # (i) Timeout terus-menerus, harus memberi reply sopan
+    fake_client_i = FakeClient([
+        TimeoutError("Request timed out after 30000ms"),
+        TimeoutError("Request timed out after 30000ms"),
+        TimeoutError("Request timed out after 30000ms"),
+        TimeoutError("Request timed out after 30000ms"),
+    ])
+    res_i = run_agent(
+        history=[],
+        user_message="Halo",
+        client=fake_client_i,
+        retry_delays=fast_retries,
+    )
+    passed_i = (
+        fake_client_i.models.call_count == 4
+        and res_i.get("reply") == TRANSIENT_ERROR_REPLY
+    )
+    detail_i = f"attempts={fake_client_i.models.call_count}, reply={res_i.get('reply')!r}"
+    print_case_result("i", "Timeout terus-menerus menghasilkan permohonan maaf sopan", passed_i, detail_i)
+    if passed_i:
         total_passed += 1
 
     total_failed = total_tests - total_passed
