@@ -1,0 +1,10 @@
+.env
+.env.*
+.venv/
+.vercel/
+data/
+logs/
+scripts/
+__pycache__/
+*.py[cod]
+*.db

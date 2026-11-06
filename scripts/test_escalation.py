@@ -6,9 +6,10 @@ Verifies:
 3. Invalid urgency validation
 4. Empty summary validation
 5. Suspicious order number is rejected
-6. list_open_tickets functionality
+6. list_open_tickets functionality and stored customer contact
 7. Missing order number is rejected
 8. Missing customer contact is rejected
+9. Closing an open ticket updates its status
 
 Does not print any secrets or tokens.
 """
@@ -30,7 +31,7 @@ temp_dir = tempfile.mkdtemp(prefix="tokobantu_test_")
 test_db_file = Path(temp_dir) / "test_escalation.db"
 os.environ["TOKOBANTU_DB"] = str(test_db_file)
 
-from app.tools.escalation import create_escalation_ticket, list_open_tickets
+from app.tools.escalation import close_ticket, create_escalation_ticket, list_open_tickets
 
 
 def print_case_result(case_num: int, title: str, passed: bool, detail: str) -> None:
@@ -50,7 +51,7 @@ def main() -> None:
     print()
 
     total_passed = 0
-    total_tests = 8
+    total_tests = 9
 
     try:
         # Kasus 1: Tiket valid
@@ -181,6 +182,14 @@ def main() -> None:
         )
         print_case_result(8, "Kontak pelanggan kosong ditolak", passed_8, f"error={res_8.get('error')!r}")
         if passed_8:
+            total_passed += 1
+
+        # Kasus 9: Tiket terbuka dapat ditutup melalui tool.
+        ticket_id = open_tickets[0].get("id") if open_tickets else None
+        closed = close_ticket(ticket_id) if isinstance(ticket_id, int) else False
+        passed_9 = closed and list_open_tickets() == []
+        print_case_result(9, "Tiket terbuka berhasil ditutup", passed_9, f"closed={closed}")
+        if passed_9:
             total_passed += 1
 
     finally:

@@ -1,4 +1,4 @@
-"""Escalation ticket tool for TokoBantu (SQLite bawaan Python, tanpa library tambahan)."""
+"""Escalation ticket tool with local SQLite and hosted Postgres storage."""
 
 import os
 import re
@@ -27,8 +27,39 @@ def _get_db_path() -> str:
     return os.getenv("TOKOBANTU_DB", DEFAULT_DB_PATH)
 
 
-def _connect() -> sqlite3.Connection:
-    """Open the database, create the folder/table, and migrate older tables."""
+def _database_url() -> str:
+    """Return the configured Postgres URL, if the deployment provides one."""
+    return os.getenv("TOKOBANTU_DATABASE_URL", "").strip() or os.getenv("DATABASE_URL", "").strip()
+
+
+def _connect() -> Any:
+    """Open Postgres in hosted environments or SQLite for local development."""
+    database_url = _database_url()
+    if (os.getenv("VERCEL") or os.getenv("TOKOBANTU_STORAGE_MODE") == "postgres") and not database_url:
+        raise RuntimeError("Persistent database is required on Vercel")
+    if database_url:
+        import psycopg
+        from psycopg.rows import dict_row
+
+        conn = psycopg.connect(database_url, row_factory=dict_row, connect_timeout=10)
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS tickets (
+                id BIGSERIAL PRIMARY KEY,
+                created_at TEXT NOT NULL,
+                summary TEXT NOT NULL,
+                reason TEXT NOT NULL,
+                urgency TEXT NOT NULL,
+                order_number TEXT,
+                contact TEXT,
+                status TEXT NOT NULL DEFAULT 'open'
+            )
+            """
+        )
+        conn.execute("ALTER TABLE tickets ADD COLUMN IF NOT EXISTS contact TEXT")
+        conn.commit()
+        return conn
+
     path = _get_db_path()
     folder = os.path.dirname(path)
     if folder:
@@ -106,18 +137,28 @@ def create_escalation_ticket(
         return {"ok": False, "error": "Email atau nomor telepon diperlukan untuk membuat tiket"}
 
     created_at = datetime.now(timezone.utc).isoformat()
+    database_url = _database_url()
 
     try:
         with closing(_connect()) as conn:
-            cursor = conn.execute(
-                "INSERT INTO tickets "
-                "(created_at, summary, reason, urgency, order_number, contact, status) "
-                "VALUES (?, ?, ?, ?, ?, ?, 'open')",
-                (created_at, clean_summary, reason, urgency, clean_order, clean_contact),
-            )
+            if database_url:
+                cursor = conn.execute(
+                    "INSERT INTO tickets "
+                    "(created_at, summary, reason, urgency, order_number, contact, status) "
+                    "VALUES (%s, %s, %s, %s, %s, %s, 'open') RETURNING id",
+                    (created_at, clean_summary, reason, urgency, clean_order, clean_contact),
+                )
+                ticket_id = cursor.fetchone()["id"]
+            else:
+                cursor = conn.execute(
+                    "INSERT INTO tickets "
+                    "(created_at, summary, reason, urgency, order_number, contact, status) "
+                    "VALUES (?, ?, ?, ?, ?, ?, 'open')",
+                    (created_at, clean_summary, reason, urgency, clean_order, clean_contact),
+                )
+                ticket_id = cursor.lastrowid
             conn.commit()
-            ticket_id = cursor.lastrowid
-    except (sqlite3.Error, OSError):
+    except Exception:
         return {"ok": False, "error": "Gagal membuat tiket"}
 
     return {
@@ -132,12 +173,41 @@ def list_open_tickets() -> list[dict[str, Any]]:
     """Return all open tickets (oldest first) for staff."""
     try:
         with closing(_connect()) as conn:
-            conn.row_factory = sqlite3.Row
-            rows = conn.execute(
-                "SELECT id, created_at, summary, reason, urgency, order_number, "
-                "contact, status FROM tickets WHERE status = ? ORDER BY id ASC",
-                ("open",),
-            ).fetchall()
+            if _database_url():
+                rows = conn.execute(
+                    "SELECT id, created_at, summary, reason, urgency, order_number, "
+                    "contact, status FROM tickets WHERE status = %s ORDER BY id ASC",
+                    ("open",),
+                ).fetchall()
+            else:
+                conn.row_factory = sqlite3.Row
+                rows = conn.execute(
+                    "SELECT id, created_at, summary, reason, urgency, order_number, "
+                    "contact, status FROM tickets WHERE status = ? ORDER BY id ASC",
+                    ("open",),
+                ).fetchall()
             return [dict(row) for row in rows]
-    except (sqlite3.Error, OSError):
+    except Exception:
         return []
+
+
+def close_ticket(ticket_id: int) -> bool:
+    """Mark an open ticket as closed and report whether one row changed."""
+    if not isinstance(ticket_id, int) or ticket_id <= 0:
+        return False
+    try:
+        with closing(_connect()) as conn:
+            if _database_url():
+                cursor = conn.execute(
+                    "UPDATE tickets SET status = %s WHERE id = %s AND status = %s",
+                    ("closed", ticket_id, "open"),
+                )
+            else:
+                cursor = conn.execute(
+                    "UPDATE tickets SET status = ? WHERE id = ? AND status = ?",
+                    ("closed", ticket_id, "open"),
+                )
+            conn.commit()
+            return cursor.rowcount == 1
+    except Exception:
+        return False
