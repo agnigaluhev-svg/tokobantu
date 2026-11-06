@@ -1,72 +1,84 @@
-"""Customer service escalation ticketing tool for TokoBantu.
+"""Escalation ticket tool for TokoBantu (SQLite bawaan Python, tanpa library tambahan)."""
 
-Manages SQLite storage for customer support tickets escalated to human staff.
-"""
-
-from datetime import datetime, timezone
 import os
-from pathlib import Path
 import re
 import sqlite3
+from contextlib import closing
+from datetime import datetime, timezone
 from typing import Any
 
-# Allowed values for validation
-ALLOWED_REASONS = {
-    "refund",
-    "damaged_item",
-    "complaint",
-    "human_requested",
-    "out_of_scope",
-    "agent_stuck",
-}
-
-ALLOWED_URGENCIES = {
-    "low",
-    "medium",
-    "high",
-}
-
 DEFAULT_DB_PATH = "data/tokobantu.db"
-INVALID_DATA_ERROR = "Data tiket tidak valid"
-DB_FAILURE_ERROR = "Gagal membuat tiket"
-SUCCESS_MESSAGE = "Tiket sudah dibuat, tim kami akan menghubungi Anda"
+
+VALID_REASONS = {
+    "refund", "damaged_item", "complaint",
+    "human_requested", "out_of_scope", "agent_stuck",
+}
+VALID_URGENCIES = {"low", "medium", "high"}
+
+ORDER_NUMBER_PATTERN = re.compile(r"^#\d+$")
+EMAIL_PATTERN = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+PHONE_PATTERN = re.compile(r"^\+?\d{8,15}$")
+
+MESSAGE_WITH_CONTACT = "Tiket sudah dibuat, tim kami akan menghubungi Anda"
+MESSAGE_NO_CONTACT = (
+    "Tiket sudah dibuat. Karena kami belum memiliki kontak Anda, "
+    "silakan hubungi layanan pelanggan kami agar tiket ini dapat ditindaklanjuti"
+)
 
 
-def _get_db_path() -> Path:
-    """Retrieve the SQLite database path from environment variable or default.
-
-    Returns:
-        Path object pointing to the configured database file.
-    """
-    raw_path = os.getenv("TOKOBANTU_DB", DEFAULT_DB_PATH)
-    return Path(raw_path)
+def _get_db_path() -> str:
+    """Return the SQLite file path from TOKOBANTU_DB or the default."""
+    return os.getenv("TOKOBANTU_DB", DEFAULT_DB_PATH)
 
 
-def _init_db(db_path: Path) -> None:
-    """Initialize the tickets table in SQLite database if it does not exist.
-
-    Args:
-        db_path: Path to the SQLite database file.
-    """
-    if db_path.parent:
-        db_path.parent.mkdir(parents=True, exist_ok=True)
-
-    with sqlite3.connect(str(db_path)) as conn:
-        cursor = conn.cursor()
-        cursor.execute(
-            """
-            CREATE TABLE IF NOT EXISTS tickets (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                created_at TEXT NOT NULL,
-                summary TEXT NOT NULL,
-                reason TEXT NOT NULL,
-                urgency TEXT NOT NULL,
-                order_number TEXT,
-                status TEXT NOT NULL DEFAULT 'open'
-            )
-            """
+def _connect() -> sqlite3.Connection:
+    """Open the database, create the folder/table, and migrate older tables."""
+    path = _get_db_path()
+    folder = os.path.dirname(path)
+    if folder:
+        os.makedirs(folder, exist_ok=True)
+    conn = sqlite3.connect(path)
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS tickets (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_at TEXT NOT NULL,
+            summary TEXT NOT NULL,
+            reason TEXT NOT NULL,
+            urgency TEXT NOT NULL,
+            order_number TEXT,
+            contact TEXT,
+            status TEXT NOT NULL DEFAULT 'open'
         )
-        conn.commit()
+        """
+    )
+    columns = [row[1] for row in conn.execute("PRAGMA table_info(tickets)")]
+    if "contact" not in columns:
+        # Migrasi aman untuk tabel lama: menambah kolom, tidak menghapus data.
+        conn.execute("ALTER TABLE tickets ADD COLUMN contact TEXT")
+    conn.commit()
+    return conn
+
+
+def _clean_order_number(order_number: Any) -> str | None:
+    """Return a valid '#1234' order number, otherwise None."""
+    if not isinstance(order_number, str):
+        return None
+    value = order_number.strip()
+    return value if ORDER_NUMBER_PATTERN.match(value) else None
+
+
+def _clean_contact(contact: Any) -> str | None:
+    """Return a valid email or phone number (max 100 chars), otherwise None."""
+    if not isinstance(contact, str):
+        return None
+    value = contact.strip()[:100]
+    if not value:
+        return None
+    if EMAIL_PATTERN.match(value):
+        return value.lower()
+    digits = re.sub(r"[\s\-().]", "", value)
+    return digits if PHONE_PATTERN.match(digits) else None
 
 
 def create_escalation_ticket(
@@ -74,104 +86,57 @@ def create_escalation_ticket(
     reason: str,
     urgency: str,
     order_number: str | None = None,
+    contact: str | None = None,
 ) -> dict[str, Any]:
-    """Create a new human escalation ticket stored in SQLite.
-
-    Validates input parameters, sanitizes summary and order number,
-    and inserts a new ticket with status 'open'.
-
-    Args:
-        summary: Concise summary of the issue (truncated to max 500 chars).
-        reason: Categorical reason for escalation (must be in ALLOWED_REASONS).
-        urgency: Urgency level ('low', 'medium', or 'high').
-        order_number: Optional order identifier (e.g. '#1001'). Stored as None
-                      if missing or invalid format.
+    """Create an escalation ticket for human staff.
 
     Returns:
-        A dictionary with operation status, ticket_id, and user message,
-        or an error dictionary if validation or insertion fails.
+        {"ok": True, "ticket_id": int, "has_contact": bool, "message": str}
+        or {"ok": False, "error": str}. Error messages hide technical details.
     """
-    # Validate reason
-    if not isinstance(reason, str) or reason.strip() not in ALLOWED_REASONS:
-        return {"ok": False, "error": INVALID_DATA_ERROR}
+    clean_summary = summary.strip()[:500] if isinstance(summary, str) else ""
+    if (
+        not clean_summary
+        or not isinstance(reason, str) or reason not in VALID_REASONS
+        or not isinstance(urgency, str) or urgency not in VALID_URGENCIES
+    ):
+        return {"ok": False, "error": "Data tiket tidak valid"}
 
-    # Validate urgency
-    if not isinstance(urgency, str) or urgency.strip() not in ALLOWED_URGENCIES:
-        return {"ok": False, "error": INVALID_DATA_ERROR}
-
-    # Validate and sanitize summary (cannot be empty, max 500 characters)
-    if not isinstance(summary, str):
-        return {"ok": False, "error": INVALID_DATA_ERROR}
-
-    clean_summary = summary.strip()
-    if not clean_summary:
-        return {"ok": False, "error": INVALID_DATA_ERROR}
-
-    truncated_summary = clean_summary[:500]
-
-    # Validate and normalize order_number: must be '#' followed by digits only
-    clean_order_number: str | None = None
-    if order_number is not None and isinstance(order_number, str):
-        candidate_order = order_number.strip()
-        if re.fullmatch(r"^#\d+$", candidate_order):
-            clean_order_number = candidate_order
-
+    clean_order = _clean_order_number(order_number)
+    clean_contact = _clean_contact(contact)
     created_at = datetime.now(timezone.utc).isoformat()
-    db_path = _get_db_path()
 
     try:
-        _init_db(db_path)
-        with sqlite3.connect(str(db_path)) as conn:
-            cursor = conn.cursor()
-            cursor.execute(
-                """
-                INSERT INTO tickets (created_at, summary, reason, urgency, order_number, status)
-                VALUES (?, ?, ?, ?, ?, 'open')
-                """,
-                (
-                    created_at,
-                    truncated_summary,
-                    reason.strip(),
-                    urgency.strip(),
-                    clean_order_number,
-                ),
+        with closing(_connect()) as conn:
+            cursor = conn.execute(
+                "INSERT INTO tickets "
+                "(created_at, summary, reason, urgency, order_number, contact, status) "
+                "VALUES (?, ?, ?, ?, ?, ?, 'open')",
+                (created_at, clean_summary, reason, urgency, clean_order, clean_contact),
             )
-            ticket_id = cursor.lastrowid
             conn.commit()
+            ticket_id = cursor.lastrowid
+    except (sqlite3.Error, OSError):
+        return {"ok": False, "error": "Gagal membuat tiket"}
 
-        return {
-            "ok": True,
-            "ticket_id": ticket_id,
-            "message": SUCCESS_MESSAGE,
-        }
-    except Exception:
-        # Return generic error message without exposing SQLite technical traces
-        return {"ok": False, "error": DB_FAILURE_ERROR}
+    return {
+        "ok": True,
+        "ticket_id": ticket_id,
+        "has_contact": clean_contact is not None,
+        "message": MESSAGE_WITH_CONTACT if clean_contact else MESSAGE_NO_CONTACT,
+    }
 
 
 def list_open_tickets() -> list[dict[str, Any]]:
-    """Retrieve all tickets currently marked with 'open' status.
-
-    Returns:
-        A list of dictionaries representing open escalation tickets.
-    """
-    db_path = _get_db_path()
-
+    """Return all open tickets (oldest first) for staff."""
     try:
-        _init_db(db_path)
-        with sqlite3.connect(str(db_path)) as conn:
+        with closing(_connect()) as conn:
             conn.row_factory = sqlite3.Row
-            cursor = conn.cursor()
-            cursor.execute(
-                """
-                SELECT id, created_at, summary, reason, urgency, order_number, status
-                FROM tickets
-                WHERE status = ?
-                ORDER BY id ASC
-                """,
+            rows = conn.execute(
+                "SELECT id, created_at, summary, reason, urgency, order_number, "
+                "contact, status FROM tickets WHERE status = ? ORDER BY id ASC",
                 ("open",),
-            )
-            rows = cursor.fetchall()
+            ).fetchall()
             return [dict(row) for row in rows]
-    except Exception:
+    except (sqlite3.Error, OSError):
         return []
