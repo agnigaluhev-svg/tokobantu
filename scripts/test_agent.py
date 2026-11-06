@@ -23,6 +23,7 @@ project_root = Path(__file__).resolve().parent.parent
 if str(project_root) not in sys.path:
     sys.path.insert(0, str(project_root))
 
+import app.agent as agent_module
 from app.agent import (
     EMPTY_MESSAGE_REPLY,
     LOOP_EXCEEDED_REPLY,
@@ -105,7 +106,7 @@ def main() -> None:
     print()
 
     total_passed = 0
-    total_tests = 9
+    total_tests = 11
     fast_retries = (0.0, 0.0, 0.0)
 
     # (a) Model langsung menjawab teks
@@ -188,6 +189,94 @@ def main() -> None:
     )
     print_case_result("c", "get_order_status diblokir guard karena email tidak ada di chat", passed_c, detail_c)
     if passed_c:
+        total_passed += 1
+
+    # (c2) Eskalasi diblokir jika order dan kontak tidak pernah diketik pelanggan
+    fake_client_c2 = FakeClient([
+        FakeResponse(function_calls=[
+            FakeFunctionCall(
+                name="create_escalation_ticket",
+                args={
+                    "summary": "Permintaan refund",
+                    "reason": "refund",
+                    "urgency": "medium",
+                    "order_number": "#1001",
+                    "contact": "budi@example.com",
+                },
+            )
+        ]),
+        FakeResponse(text="Mohon kirim nomor pesanan dan kontak Anda."),
+    ])
+    res_c2 = run_agent(
+        history=[],
+        user_message="Saya mau refund",
+        client=fake_client_c2,
+        retry_delays=fast_retries,
+    )
+    passed_c2 = (
+        len(res_c2.get("tool_calls", [])) == 1
+        and res_c2["tool_calls"][0]["result"] == {
+            "ok": False,
+            "error": "Minta nomor pesanan kepada pelanggan sebelum membuat tiket",
+        }
+    )
+    print_case_result(
+        "c2",
+        "Eskalasi diblokir jika order dan kontak tidak diberikan pelanggan",
+        passed_c2,
+        "tool tidak dijalankan untuk nilai yang tidak diketik pelanggan",
+    )
+    if passed_c2:
+        total_passed += 1
+
+    # (c3) Eskalasi boleh dibuat saat nilai berasal dari pesan pelanggan
+    original_escalation_tool = agent_module.TOOL_FUNCTIONS["create_escalation_ticket"]
+    recorded_ticket_args: list[dict[str, Any]] = []
+
+    def fake_create_ticket(**kwargs: Any) -> dict[str, Any]:
+        """Record a valid escalation call without writing to a database."""
+        recorded_ticket_args.append(kwargs)
+        return {"ok": True, "ticket_id": 77}
+
+    agent_module.TOOL_FUNCTIONS["create_escalation_ticket"] = fake_create_ticket
+    try:
+        fake_client_c3 = FakeClient([
+            FakeResponse(function_calls=[
+                FakeFunctionCall(
+                    name="create_escalation_ticket",
+                    args={
+                        "summary": "Permintaan refund",
+                        "reason": "refund",
+                        "urgency": "medium",
+                        "order_number": "#1001",
+                        "contact": "budi@example.com",
+                    },
+                )
+            ]),
+            FakeResponse(text="Tiket #77 berhasil dibuat."),
+        ])
+        res_c3 = run_agent(
+            history=[{"role": "user", "content": "Pesanan #1001"}],
+            user_message="Saya mau refund, email saya budi@example.com",
+            client=fake_client_c3,
+            retry_delays=fast_retries,
+        )
+    finally:
+        agent_module.TOOL_FUNCTIONS["create_escalation_ticket"] = original_escalation_tool
+
+    passed_c3 = (
+        len(recorded_ticket_args) == 1
+        and recorded_ticket_args[0].get("order_number") == "#1001"
+        and recorded_ticket_args[0].get("contact") == "budi@example.com"
+        and res_c3.get("tool_calls", [])[0].get("result") == {"ok": True, "ticket_id": 77}
+    )
+    print_case_result(
+        "c3",
+        "Eskalasi memakai order dan kontak yang diketik pelanggan",
+        passed_c3,
+        f"ticket_tool_called={len(recorded_ticket_args) == 1}",
+    )
+    if passed_c3:
         total_passed += 1
 
     # (d) Model terus-menerus meminta tool, harus berhenti di 6 putaran

@@ -1,12 +1,14 @@
 """Test script for escalation ticket tool using a temporary SQLite database.
 
 Verifies:
-1. Valid ticket creation
+1. Valid ticket creation with order number and customer contact
 2. Invalid reason validation
 3. Invalid urgency validation
 4. Empty summary validation
-5. Suspicious order number (e.g., SQL injection attempt '1; DROP TABLE')
+5. Suspicious order number is rejected
 6. list_open_tickets functionality
+7. Missing order number is rejected
+8. Missing customer contact is rejected
 
 Does not print any secrets or tokens.
 """
@@ -48,7 +50,7 @@ def main() -> None:
     print()
 
     total_passed = 0
-    total_tests = 6
+    total_tests = 8
 
     try:
         # Kasus 1: Tiket valid
@@ -57,11 +59,13 @@ def main() -> None:
             reason="refund",
             urgency="high",
             order_number="#1001",
+            contact="budi.santoso@example.com",
         )
         passed_1 = (
             res_1.get("ok") is True
             and isinstance(res_1.get("ticket_id"), int)
             and res_1.get("ticket_id", 0) > 0
+            and res_1.get("has_contact") is True
             and res_1.get("message") == "Tiket sudah dibuat, tim kami akan menghubungi Anda"
         )
         detail_1 = f"ok={res_1.get('ok')}, ticket_id={res_1.get('ticket_id')}, msg={res_1.get('message')!r}"
@@ -120,32 +124,63 @@ def main() -> None:
             reason="out_of_scope",
             urgency="medium",
             order_number="1; DROP TABLE tickets; --",
+            contact="budi.santoso@example.com",
         )
         passed_5 = (
-            res_5.get("ok") is True
-            and isinstance(res_5.get("ticket_id"), int)
+            res_5.get("ok") is False
+            and res_5.get("error") == "Nomor pesanan diperlukan untuk membuat tiket"
         )
-        detail_5 = f"ok={res_5.get('ok')}, ticket_id={res_5.get('ticket_id')} (disimpan sebagai None)"
-        print_case_result(5, "Order number mencurigakan ('1; DROP TABLE')", passed_5, detail_5)
+        detail_5 = f"ok={res_5.get('ok')}, error={res_5.get('error')!r}"
+        print_case_result(5, "Order number mencurigakan ditolak ('1; DROP TABLE')", passed_5, detail_5)
         if passed_5:
             total_passed += 1
 
         # Kasus 6: list_open_tickets
         open_tickets = list_open_tickets()
-        # Harus ada 2 tiket terbuka (Kasus 1 dan Kasus 5)
+        # Hanya Kasus 1 yang berhasil membuat tiket.
         passed_6 = (
-            len(open_tickets) == 2
+            len(open_tickets) == 1
             and open_tickets[0].get("order_number") == "#1001"
-            and open_tickets[1].get("order_number") is None
+            and open_tickets[0].get("contact") == "budi.santoso@example.com"
             and open_tickets[0].get("status") == "open"
         )
         detail_6 = (
             f"total_open={len(open_tickets)}, "
             f"ticket_1_order={open_tickets[0].get('order_number') if open_tickets else None!r}, "
-            f"ticket_2_order={open_tickets[1].get('order_number') if len(open_tickets) > 1 else None!r}"
+            f"ticket_1_has_contact={bool(open_tickets and open_tickets[0].get('contact'))}"
         )
         print_case_result(6, "list_open_tickets() untuk staf", passed_6, detail_6)
         if passed_6:
+            total_passed += 1
+
+        # Kasus 7: Nomor pesanan wajib diisi.
+        res_7 = create_escalation_ticket(
+            summary="Pelanggan meminta refund",
+            reason="refund",
+            urgency="medium",
+            contact="budi.santoso@example.com",
+        )
+        passed_7 = (
+            res_7.get("ok") is False
+            and res_7.get("error") == "Nomor pesanan diperlukan untuk membuat tiket"
+        )
+        print_case_result(7, "Nomor pesanan kosong ditolak", passed_7, f"error={res_7.get('error')!r}")
+        if passed_7:
+            total_passed += 1
+
+        # Kasus 8: Kontak pelanggan wajib diisi.
+        res_8 = create_escalation_ticket(
+            summary="Pelanggan meminta refund",
+            reason="refund",
+            urgency="medium",
+            order_number="#1001",
+        )
+        passed_8 = (
+            res_8.get("ok") is False
+            and res_8.get("error") == "Email atau nomor telepon diperlukan untuk membuat tiket"
+        )
+        print_case_result(8, "Kontak pelanggan kosong ditolak", passed_8, f"error={res_8.get('error')!r}")
+        if passed_8:
             total_passed += 1
 
     finally:

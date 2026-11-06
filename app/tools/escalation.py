@@ -20,10 +20,6 @@ EMAIL_PATTERN = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 PHONE_PATTERN = re.compile(r"^\+?\d{8,15}$")
 
 MESSAGE_WITH_CONTACT = "Tiket sudah dibuat, tim kami akan menghubungi Anda"
-MESSAGE_NO_CONTACT = (
-    "Tiket sudah dibuat. Karena kami belum memiliki kontak Anda, "
-    "silakan hubungi layanan pelanggan kami agar tiket ini dapat ditindaklanjuti"
-)
 
 
 def _get_db_path() -> str:
@@ -90,9 +86,8 @@ def create_escalation_ticket(
 ) -> dict[str, Any]:
     """Create an escalation ticket for human staff.
 
-    Returns:
-        {"ok": True, "ticket_id": int, "has_contact": bool, "message": str}
-        or {"ok": False, "error": str}. Error messages hide technical details.
+    A ticket is created only when the customer supplied a valid order number
+    and a contact address. Returns a ticket id on success, or a safe error.
     """
     clean_summary = summary.strip()[:500] if isinstance(summary, str) else ""
     if (
@@ -103,7 +98,13 @@ def create_escalation_ticket(
         return {"ok": False, "error": "Data tiket tidak valid"}
 
     clean_order = _clean_order_number(order_number)
+    if clean_order is None:
+        return {"ok": False, "error": "Nomor pesanan diperlukan untuk membuat tiket"}
+
     clean_contact = _clean_contact(contact)
+    if clean_contact is None:
+        return {"ok": False, "error": "Email atau nomor telepon diperlukan untuk membuat tiket"}
+
     created_at = datetime.now(timezone.utc).isoformat()
 
     try:
@@ -122,8 +123,8 @@ def create_escalation_ticket(
     return {
         "ok": True,
         "ticket_id": ticket_id,
-        "has_contact": clean_contact is not None,
-        "message": MESSAGE_WITH_CONTACT if clean_contact else MESSAGE_NO_CONTACT,
+        "has_contact": True,
+        "message": MESSAGE_WITH_CONTACT,
     }
 
 

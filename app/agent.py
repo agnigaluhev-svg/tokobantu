@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
+import re
 import time
 from typing import Any, Callable
 
@@ -142,6 +143,27 @@ def _is_email_provided_by_user(email: str, user_texts: list[str]) -> bool:
     if not clean_target:
         return False
     return any(clean_target in text.lower() for text in user_texts)
+
+
+def _is_order_number_provided_by_user(order_number: str, user_texts: list[str]) -> bool:
+    """Check that the customer typed this exact order number in chat."""
+    match = re.fullmatch(r"#?(\d+)", order_number.strip())
+    if not match:
+        return False
+    target = re.compile(rf"(?<!\w)#?{re.escape(match.group(1))}(?!\w)")
+    return any(target.search(text) is not None for text in user_texts)
+
+
+def _is_contact_provided_by_user(contact: str, user_texts: list[str]) -> bool:
+    """Check that the customer typed this email address or phone number."""
+    clean_contact = contact.strip()
+    if "@" in clean_contact:
+        return any(clean_contact.lower() in text.lower() for text in user_texts)
+
+    target_digits = re.sub(r"\D", "", clean_contact)
+    if len(target_digits) < 8:
+        return False
+    return any(target_digits in re.sub(r"\D", "", text) for text in user_texts)
 
 
 def _is_transient_error(exc: Exception) -> bool:
@@ -349,6 +371,31 @@ def run_agent(
                     # Guard: Block execution if email was never typed by customer
                     ok = False
                     tool_result = {"ok": False, "error": "Email belum diberikan pelanggan"}
+                else:
+                    try:
+                        tool_result = TOOL_FUNCTIONS[tool_name](**tool_args)
+                        ok = tool_result.get("ok", True) if isinstance(tool_result, dict) else True
+                    except Exception as exc:
+                        ok = False
+                        tool_result = {
+                            "ok": False,
+                            "error": f"Gagal mengeksekusi tool: {exc.__class__.__name__}",
+                        }
+            elif tool_name == "create_escalation_ticket":
+                order_number = str(tool_args.get("order_number", "")).strip()
+                contact = str(tool_args.get("contact", "")).strip()
+                if not _is_order_number_provided_by_user(order_number, user_texts):
+                    ok = False
+                    tool_result = {
+                        "ok": False,
+                        "error": "Minta nomor pesanan kepada pelanggan sebelum membuat tiket",
+                    }
+                elif not _is_contact_provided_by_user(contact, user_texts):
+                    ok = False
+                    tool_result = {
+                        "ok": False,
+                        "error": "Minta email atau nomor telepon kepada pelanggan sebelum membuat tiket",
+                    }
                 else:
                     try:
                         tool_result = TOOL_FUNCTIONS[tool_name](**tool_args)
