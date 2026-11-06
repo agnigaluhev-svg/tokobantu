@@ -1,7 +1,19 @@
+$isi = @'
 [project]
 name = "tokobantu"
 version = "0.1.0"
-requires-python = ">=3.13,<3.14"
+requires-python = ">=3.13"
+dependencies = [
+    "fastapi",
+    "uvicorn",
+    "httpx",
+    "python-dotenv",
+    "google-genai",
+    "psycopg[binary]",
+]
 
 [tool.vercel]
 entrypoint = "app.main:app"
+'@
+[System.IO.File]::WriteAllText("$PWD\pyproject.toml", $isi, (New-Object System.Text.UTF8Encoding $false))
+Get-Content pyproject.toml
