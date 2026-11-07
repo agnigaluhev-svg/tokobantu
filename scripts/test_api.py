@@ -141,9 +141,41 @@ class ApiTests(unittest.TestCase):
 
     def test_health_endpoint_remains_available(self) -> None:
         """Keep the health endpoint independent from staff authentication."""
-        response = self.client.get("/health")
+        with patch.dict(os.environ, {"VERCEL": "", "TOKOBANTU_STORAGE_MODE": ""}):
+            response = self.client.get("/health")
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json(), {"status": "ok"})
+
+    def test_hosted_health_requires_database_configuration(self) -> None:
+        """Expose missing persistent storage as not ready in hosted mode."""
+        with patch.dict(os.environ, {"VERCEL": "1", "TOKOBANTU_STORAGE_MODE": "postgres"}), patch.object(
+            main_module, "_database_url", return_value=""
+        ):
+            response = self.client.get("/health")
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.json()["detail"], "Database persisten belum dikonfigurasi")
+
+    def test_hosted_health_checks_database_connection(self) -> None:
+        """Return ready only after a hosted database can execute a query."""
+        connection = MagicMock()
+        connection.__enter__.return_value = connection
+        with patch.dict(os.environ, {"VERCEL": "1", "TOKOBANTU_STORAGE_MODE": "postgres"}), patch.object(
+            main_module, "_database_url", return_value="postgresql://test"
+        ), patch.object(main_module, "_connect_cloud_database", return_value=connection):
+            response = self.client.get("/health")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {"status": "ok"})
+        connection.execute.assert_called_once_with("SELECT 1")
+        connection.commit.assert_called_once_with()
+
+    def test_hosted_health_reports_database_unavailable(self) -> None:
+        """Avoid reporting ready when hosted Postgres cannot be reached."""
+        with patch.dict(os.environ, {"VERCEL": "1", "TOKOBANTU_STORAGE_MODE": "postgres"}), patch.object(
+            main_module, "_database_url", return_value="postgresql://test"
+        ), patch.object(main_module, "_connect_cloud_database", side_effect=RuntimeError("offline")):
+            response = self.client.get("/health")
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.json()["detail"], "Database persisten tidak tersedia")
 
     def test_frontend_is_served_from_root(self) -> None:
         """Serve the customer chat page from the static root mount."""

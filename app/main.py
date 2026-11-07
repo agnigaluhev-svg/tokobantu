@@ -286,7 +286,15 @@ def _authorize_staff(request: Request) -> None:
 
 @app.get("/health")
 def health() -> dict[str, str]:
-    """Return a simple service health response."""
+    """Return service readiness without exposing database configuration."""
+    if _requires_shared_storage():
+        _require_shared_storage()
+        try:
+            with _connect_cloud_database() as conn:
+                conn.execute("SELECT 1")
+                conn.commit()
+        except Exception:
+            raise HTTPException(status_code=503, detail="Database persisten tidak tersedia") from None
     return {"status": "ok"}
 
 

@@ -111,7 +111,7 @@ The suite covers API validation and limits, session expiry, staff authorization,
 
 ## Deployment notes
 
-The app is configured for Vercel Preview deployments. Hosted mode requires a Postgres connection (`DATABASE_URL` or `TOKOBANTU_DATABASE_URL`) and `TOKOBANTU_STORAGE_MODE=postgres`; it will not fall back to ephemeral SQLite. Store Shopify, Gemini, staff, and rate-limit secrets in Vercel's Preview environment. Keep the public demo connected only to synthetic data in a development store.
+The app is configured for Vercel Preview deployments. Hosted mode requires a Postgres connection (`DATABASE_URL` or `TOKOBANTU_DATABASE_URL`) and `TOKOBANTU_STORAGE_MODE=postgres`; it will not fall back to ephemeral SQLite. In hosted mode, `/health` checks that Postgres can execute a query and returns `503` if persistent storage is missing or unavailable. Store Shopify, Gemini, staff, and rate-limit secrets in Vercel's Preview environment. Keep the public demo connected only to synthetic data in a development store.
 
 ## Project structure
 
