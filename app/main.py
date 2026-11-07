@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 import hashlib
 import hmac
 import json
+import logging
 from pathlib import Path
 import os
 import secrets
@@ -20,6 +21,8 @@ from pydantic import BaseModel, Field
 
 from app.agent import run_agent
 from app.tools.escalation import close_ticket, list_open_tickets
+
+logger = logging.getLogger(__name__)
 
 SESSION_LIMIT = 500
 SESSION_TTL_SECONDS = 30 * 60
@@ -313,14 +316,21 @@ def chat(body: ChatRequest, request: Request) -> dict[str, Any]:
         try:
             allowed = _allow_cloud_request(session_id, client_ip)
             history = _get_cloud_history(session_id) if allowed else []
-        except Exception:
-            raise HTTPException(status_code=503, detail="Layanan chat sedang disiapkan") from None
+        except Exception as exc:
+            logger.error("Shared chat storage failed (%s)", type(exc).__name__)
+            detail = (
+                "Database persisten belum dikonfigurasi"
+                if not _database_url()
+                else "Penyimpanan chat sedang tidak tersedia"
+            )
+            raise HTTPException(status_code=503, detail=detail) from None
         if not allowed:
             raise HTTPException(status_code=429, detail=RATE_LIMIT_REPLY)
-        result = run_agent(history=history, user_message=body.message)
+        result = _run_agent_or_unavailable(history, body.message)
         try:
             _save_cloud_history(session_id, list(result.get("history", history))[-HISTORY_LIMIT:])
-        except Exception:
+        except Exception as exc:
+            logger.error("Shared chat history save failed (%s)", type(exc).__name__)
             raise HTTPException(status_code=503, detail="Riwayat chat tidak dapat disimpan") from None
     else:
         with _state_lock:
@@ -329,7 +339,7 @@ def chat(body: ChatRequest, request: Request) -> dict[str, Any]:
             state = _get_session(session_id, now)
 
         with state.lock:
-            result = run_agent(history=list(state.history), user_message=body.message)
+            result = _run_agent_or_unavailable(list(state.history), body.message)
             state.history = list(result.get("history", state.history))[-HISTORY_LIMIT:]
             with _state_lock:
                 state.last_active = time.monotonic()
@@ -339,6 +349,21 @@ def chat(body: ChatRequest, request: Request) -> dict[str, Any]:
         "reply": result.get("reply", ""),
         "tools": [call.get("name", "") for call in tool_calls if isinstance(call, dict)],
     }
+
+
+def _run_agent_or_unavailable(history: list[Any], user_message: str) -> dict[str, Any]:
+    """Return a safe API error when the agent provider is misconfigured or down."""
+    try:
+        return run_agent(history=history, user_message=user_message)
+    except Exception as exc:
+        logger.error("Agent request failed (%s)", type(exc).__name__)
+        if isinstance(exc, ValueError) and str(exc) == (
+            "GEMINI_API_KEY environment variable is missing or empty."
+        ):
+            detail = "Layanan AI belum dikonfigurasi"
+        else:
+            detail = "Layanan AI sedang tidak tersedia"
+        raise HTTPException(status_code=503, detail=detail) from None
 
 
 @app.get("/staff/tickets")

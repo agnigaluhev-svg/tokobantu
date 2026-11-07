@@ -257,6 +257,14 @@
               ? (payload.detail || "Pesan Anda terlalu cepat. Silakan coba lagi sebentar.")
               : response.status === 422
                 ? "Pesan tidak dapat diproses. Periksa panjang pesan Anda lalu coba lagi."
+                : response.status === 503 && [
+                  "Database persisten belum dikonfigurasi",
+                  "Penyimpanan chat sedang tidak tersedia",
+                  "Riwayat chat tidak dapat disimpan",
+                  "Layanan AI belum dikonfigurasi",
+                  "Layanan AI sedang tidak tersedia",
+                ].includes(payload.detail)
+                  ? payload.detail
                 : "Maaf, layanan sedang mengalami kendala. Silakan coba lagi sebentar.";
             addMessage(reply, "assistant", true);
           } else {

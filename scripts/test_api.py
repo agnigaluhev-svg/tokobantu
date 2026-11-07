@@ -86,6 +86,51 @@ class ApiTests(unittest.TestCase):
             self.assertEqual(limited_ip.status_code, 429)
             self.assertIn("Silakan coba lagi", limited_ip.json()["detail"])
 
+    def test_agent_failure_returns_safe_message_and_logs_only_exception_type(self) -> None:
+        """Avoid a generic 500 while excluding exception text from logs."""
+        private_marker = "customer@example.com"
+        with patch.dict(os.environ, {"VERCEL": "", "TOKOBANTU_STORAGE_MODE": ""}), patch.object(
+            main_module, "run_agent", side_effect=RuntimeError(private_marker)
+        ), self.assertLogs(main_module.logger, level="ERROR") as captured:
+            response = self.client.post(
+                "/chat", json={"session_id": str(uuid4()), "message": "Tolong cek"}
+            )
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.json()["detail"], "Layanan AI sedang tidak tersedia")
+        self.assertIn("RuntimeError", "\n".join(captured.output))
+        self.assertNotIn(private_marker, "\n".join(captured.output))
+
+    def test_missing_gemini_key_returns_safe_configuration_message(self) -> None:
+        """Make a missing Gemini key diagnosable without exposing a secret."""
+        with patch.dict(os.environ, {"VERCEL": "", "TOKOBANTU_STORAGE_MODE": ""}), patch.object(
+            main_module,
+            "run_agent",
+            side_effect=ValueError("GEMINI_API_KEY environment variable is missing or empty."),
+        ):
+            response = self.client.post(
+                "/chat", json={"session_id": str(uuid4()), "message": "Tolong cek"}
+            )
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.json()["detail"], "Layanan AI belum dikonfigurasi")
+
+    def test_hosted_chat_reports_missing_database_configuration(self) -> None:
+        """Explain the hosted persistent database requirement without exposing config."""
+        env = {
+            "VERCEL": "1",
+            "TOKOBANTU_STORAGE_MODE": "",
+            "TOKOBANTU_DATABASE_URL": "",
+            "DATABASE_URL": "",
+            "RATE_LIMIT_SECRET": "test-secret",
+        }
+        with patch.dict(os.environ, env), patch.object(
+            main_module, "_allow_cloud_request", side_effect=RuntimeError("no database")
+        ):
+            response = self.client.post(
+                "/chat", json={"session_id": str(uuid4()), "message": "Halo"}
+            )
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.json()["detail"], "Database persisten belum dikonfigurasi")
+
     def test_staff_requires_authorization(self) -> None:
         """Reject requests with no staff header or a wrong token."""
         with patch.dict(os.environ, {"STAFF_TOKEN": "test-secret"}), patch.object(
