@@ -109,9 +109,18 @@ $env:PYTHON_DOTENV_DISABLED = "true"
 
 The suite covers API validation and limits, session expiry, staff authorization, agent retry/tool guards, escalation validation, policies, stock states, order verification, and prompt-injection cases.
 
-## Deployment notes
+## Vercel Preview deployment
 
-The app is configured for Vercel Preview deployments. Hosted mode requires a Postgres connection (`DATABASE_URL` or `TOKOBANTU_DATABASE_URL`) and `TOKOBANTU_STORAGE_MODE=postgres`; it will not fall back to ephemeral SQLite. In hosted mode, `/health` checks that Postgres can execute a query and returns `503` if persistent storage is missing or unavailable. Store Shopify, Gemini, staff, and rate-limit secrets in Vercel's Preview environment. Keep the public demo connected only to synthetic data in a development store.
+The application is configured for Vercel's Python runtime. `app/main.py` is the FastAPI entrypoint, and the function duration is set to 300 seconds, matching the Vercel Hobby limit when Fluid Compute is enabled. The function uses Vercel's serverless filesystem only for code and static assets; it never uses that filesystem for persistent customer or ticket data.
+
+Before a Preview deployment can serve chat requests:
+
+1. Connect a PostgreSQL database to this Vercel project through the Marketplace (for example, Neon). Make sure the Preview environment receives the connection string as `DATABASE_URL` or `TOKOBANTU_DATABASE_URL`.
+2. Set `TOKOBANTU_STORAGE_MODE=postgres` in the Vercel Preview environment. Hosted mode fails closed instead of falling back to temporary SQLite storage.
+3. Add the Shopify app credentials, `GEMINI_API_KEY`, `STAFF_TOKEN`, and `RATE_LIMIT_SECRET` to the Vercel Preview environment. Set `GEMINI_MODEL` if using a model other than the code default.
+4. Redeploy the Preview branch after changing environment variables. Check `/health`; it returns `503` until the configured database can run a query.
+
+Keep these credentials in Vercel's server-side environment settings; the frontend does not use them. Connect only a Shopify development store with synthetic customer data to public demos. Production and Preview use separate environment scopes, so configure Preview variables for the `vercel-preview` branch deployment.
 
 ## Project structure
 
