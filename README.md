@@ -115,7 +115,7 @@ The application is configured for Vercel's Python runtime. `app/main.py` is the 
 
 Before a Preview deployment can serve chat requests:
 
-1. Connect a PostgreSQL database to this Vercel project through the Marketplace (for example, Neon). Make sure the Preview environment receives the connection string as `DATABASE_URL` or `TOKOBANTU_DATABASE_URL`.
+1. Connect a PostgreSQL database to this Vercel project through the Marketplace (for example, Neon). The Preview environment must receive the connection string as `DATABASE_URL`, `TOKOBANTU_DATABASE_URL`, or `STORAGE_URL` (Neon's default Vercel prefix).
 2. Set `TOKOBANTU_STORAGE_MODE=postgres` in the Vercel Preview environment. Hosted mode fails closed instead of falling back to temporary SQLite storage.
 3. Add the Shopify app credentials, `GEMINI_API_KEY`, `STAFF_TOKEN`, and `RATE_LIMIT_SECRET` to the Vercel Preview environment. Set `GEMINI_MODEL` if using a model other than the code default.
 4. Redeploy the Preview branch after changing environment variables. Check `/health`; it returns `503` until the configured database can run a query.

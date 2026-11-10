@@ -17,6 +17,7 @@ if str(project_root) not in sys.path:
     sys.path.insert(0, str(project_root))
 
 import app.main as main_module
+import app.tools.escalation as escalation_module
 
 
 class ApiTests(unittest.TestCase):
@@ -120,6 +121,7 @@ class ApiTests(unittest.TestCase):
             "TOKOBANTU_STORAGE_MODE": "",
             "TOKOBANTU_DATABASE_URL": "",
             "DATABASE_URL": "",
+            "STORAGE_URL": "",
             "RATE_LIMIT_SECRET": "test-secret",
         }
         with patch.dict(os.environ, env), patch.object(
@@ -130,6 +132,19 @@ class ApiTests(unittest.TestCase):
             )
         self.assertEqual(response.status_code, 503)
         self.assertEqual(response.json()["detail"], "Database persisten belum dikonfigurasi")
+
+    def test_neon_storage_url_is_used_by_chat_and_ticket_storage(self) -> None:
+        """Accept the STORAGE_URL name shown by Vercel's Neon connect dialog."""
+        with patch.dict(
+            os.environ,
+            {
+                "TOKOBANTU_DATABASE_URL": "",
+                "DATABASE_URL": "",
+                "STORAGE_URL": "postgresql://test.invalid/db",
+            },
+        ):
+            self.assertEqual(main_module._database_url(), "postgresql://test.invalid/db")
+            self.assertEqual(escalation_module._database_url(), "postgresql://test.invalid/db")
 
     def test_staff_requires_authorization(self) -> None:
         """Reject requests with no staff header or a wrong token."""
@@ -221,6 +236,67 @@ class ApiTests(unittest.TestCase):
             response = self.client.get("/health")
         self.assertEqual(response.status_code, 503)
         self.assertEqual(response.json()["detail"], "Database persisten tidak tersedia")
+
+    def test_health_storage_error_log_sanitizes_connection_details(self) -> None:
+        """Log database failures without full URLs, credentials, email, or tokens."""
+        error_message = (
+            "connect failed postgres://dbuser:dbpass@db.example/orders "
+            "postgresql://dbuser2:dbpass2@db2.example/orders "
+            "password=hiddenpass user=hiddenuser customer@example.com "
+            "Bearer bearer-secret token=api-secret "
+            + "x" * 400
+        )
+        with patch.dict(os.environ, {"VERCEL": "1", "TOKOBANTU_STORAGE_MODE": "postgres"}), patch.object(
+            main_module, "_database_url", return_value="postgresql://not-logged.example/db"
+        ), patch.object(
+            main_module, "_connect_cloud_database", side_effect=RuntimeError(error_message)
+        ), self.assertLogs(main_module.logger, level="ERROR") as captured:
+            response = self.client.get("/health")
+
+        self.assertEqual(response.status_code, 503)
+        log_message = "\n".join(captured.output)
+        self.assertIn("RuntimeError", log_message)
+        self.assertIn("[REDACTED_DATABASE_URL]", log_message)
+        self.assertIn("password=[REDACTED]", log_message)
+        self.assertIn("user=[REDACTED]", log_message)
+        for sensitive_value in (
+            "postgres://dbuser:dbpass@db.example/orders",
+            "postgresql://dbuser2:dbpass2@db2.example/orders",
+            "hiddenpass",
+            "hiddenuser",
+            "customer@example.com",
+            "bearer-secret",
+            "api-secret",
+            "not-logged.example",
+        ):
+            self.assertNotIn(sensitive_value, log_message)
+        sanitized_message = log_message.split("): ", maxsplit=1)[1]
+        self.assertLessEqual(len(sanitized_message), 300)
+
+    def test_ticket_storage_error_log_sanitizes_connection_details(self) -> None:
+        """Keep ticket database errors useful without logging connection secrets."""
+        error_message = "failed postgres://dbuser:dbpass@db.example/tickets user=privateuser"
+        with patch.dict(
+            os.environ,
+            {"VERCEL": "1", "TOKOBANTU_DATABASE_URL": "postgresql://not-logged.example/db"},
+        ), patch.object(
+            escalation_module, "_connect", side_effect=RuntimeError(error_message)
+        ), self.assertLogs(escalation_module.logger, level="ERROR") as captured:
+            result = escalation_module.create_escalation_ticket(
+                summary="Barang rusak",
+                reason="damaged_item",
+                urgency="medium",
+                order_number="#1234",
+                contact="customer@example.com",
+            )
+
+        self.assertFalse(result["ok"])
+        log_message = "\n".join(captured.output)
+        self.assertIn("RuntimeError", log_message)
+        self.assertIn("[REDACTED_DATABASE_URL]", log_message)
+        self.assertNotIn("postgres://dbuser:dbpass@db.example/tickets", log_message)
+        self.assertNotIn("privateuser", log_message)
+        self.assertNotIn("customer@example.com", log_message)
 
     def test_frontend_is_served_from_root(self) -> None:
         """Serve the customer chat page from the static root mount."""

@@ -1,5 +1,6 @@
 """Escalation ticket tool with local SQLite and hosted Postgres storage."""
 
+import logging
 import os
 import re
 import sqlite3
@@ -21,6 +22,41 @@ PHONE_PATTERN = re.compile(r"^\+?\d{8,15}$")
 
 MESSAGE_WITH_CONTACT = "Tiket sudah dibuat, tim kami akan menghubungi Anda"
 
+logger = logging.getLogger(__name__)
+
+
+def log_storage_error(target_logger: logging.Logger, operation: str, error: BaseException) -> None:
+    """Log a storage failure without connection credentials or customer identifiers."""
+    source_error = error
+    while source_error.__cause__ is not None:
+        source_error = source_error.__cause__
+
+    detail = getattr(source_error, "detail", None)
+    message = detail if isinstance(detail, str) else str(source_error)
+    message = re.sub(r"(?i)postgres(?:ql)?://\S+", "[REDACTED_DATABASE_URL]", message)
+    message = re.sub(
+        r"(?i)\b(password|user)\s*=\s*\S+",
+        lambda match: f"{match.group(1)}=[REDACTED]",
+        message,
+    )
+    message = re.sub(r"(?i)\bBearer\s+\S+", "Bearer [REDACTED]", message)
+    message = re.sub(
+        r"(?i)\b(token|access[_-]?token|refresh[_-]?token|api[_-]?key|secret)\s*[:=]\s*\S+",
+        lambda match: f"{match.group(1)}=[REDACTED]",
+        message,
+    )
+    message = re.sub(
+        r"(?i)\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b",
+        "[REDACTED_EMAIL]",
+        message,
+    )
+    target_logger.error(
+        "%s failed (%s): %s",
+        operation,
+        type(source_error).__name__,
+        message[:300],
+    )
+
 
 def _get_db_path() -> str:
     """Return the SQLite file path from TOKOBANTU_DB or the default."""
@@ -28,8 +64,12 @@ def _get_db_path() -> str:
 
 
 def _database_url() -> str:
-    """Return the configured Postgres URL, if the deployment provides one."""
-    return os.getenv("TOKOBANTU_DATABASE_URL", "").strip() or os.getenv("DATABASE_URL", "").strip()
+    """Return the Postgres URL from standard or Vercel Neon variable names."""
+    for name in ("TOKOBANTU_DATABASE_URL", "DATABASE_URL", "STORAGE_URL"):
+        value = os.getenv(name, "").strip()
+        if value:
+            return value
+    return ""
 
 
 def _connect() -> Any:
@@ -158,7 +198,8 @@ def create_escalation_ticket(
                 )
                 ticket_id = cursor.lastrowid
             conn.commit()
-    except Exception:
+    except Exception as exc:
+        log_storage_error(logger, "Ticket create storage", exc)
         return {"ok": False, "error": "Gagal membuat tiket"}
 
     return {
@@ -187,7 +228,8 @@ def list_open_tickets() -> list[dict[str, Any]]:
                     ("open",),
                 ).fetchall()
             return [dict(row) for row in rows]
-    except Exception:
+    except Exception as exc:
+        log_storage_error(logger, "Ticket list storage", exc)
         return []
 
 
@@ -209,5 +251,6 @@ def close_ticket(ticket_id: int) -> bool:
                 )
             conn.commit()
             return cursor.rowcount == 1
-    except Exception:
+    except Exception as exc:
+        log_storage_error(logger, "Ticket close storage", exc)
         return False

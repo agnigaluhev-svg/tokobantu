@@ -20,7 +20,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from app.agent import run_agent
-from app.tools.escalation import close_ticket, list_open_tickets
+from app.tools.escalation import close_ticket, list_open_tickets, log_storage_error
 
 logger = logging.getLogger(__name__)
 
@@ -91,8 +91,12 @@ def _allow_request(session_id: str, client_ip: str, now: float) -> bool:
 
 
 def _database_url() -> str:
-    """Return the configured hosted database URL, if present."""
-    return os.getenv("TOKOBANTU_DATABASE_URL", "").strip() or os.getenv("DATABASE_URL", "").strip()
+    """Return the database URL from standard or Vercel Neon variable names."""
+    for name in ("TOKOBANTU_DATABASE_URL", "DATABASE_URL", "STORAGE_URL"):
+        value = os.getenv(name, "").strip()
+        if value:
+            return value
+    return ""
 
 
 def _uses_shared_storage() -> bool:
@@ -113,14 +117,17 @@ def _require_shared_storage() -> None:
 
 def _verify_shared_storage() -> None:
     """Verify the configured hosted database before staff ticket operations."""
-    _require_shared_storage()
-    if not _database_url():
-        return
     try:
+        _require_shared_storage()
+        if not _database_url():
+            return
         with _connect_cloud_database() as conn:
             _ensure_cloud_tables(conn)
             conn.commit()
-    except Exception:
+    except Exception as exc:
+        log_storage_error(logger, "Postgres staff ticket storage check", exc)
+        if isinstance(exc, HTTPException):
+            raise
         raise HTTPException(status_code=503, detail="Database tiket sedang tidak tersedia") from None
 
 
@@ -291,12 +298,15 @@ def _authorize_staff(request: Request) -> None:
 def health() -> dict[str, str]:
     """Return service readiness without exposing database configuration."""
     if _requires_shared_storage():
-        _require_shared_storage()
         try:
+            _require_shared_storage()
             with _connect_cloud_database() as conn:
                 conn.execute("SELECT 1")
                 conn.commit()
-        except Exception:
+        except Exception as exc:
+            log_storage_error(logger, "Postgres health check", exc)
+            if isinstance(exc, HTTPException):
+                raise
             raise HTTPException(status_code=503, detail="Database persisten tidak tersedia") from None
     return {"status": "ok"}
 
@@ -317,7 +327,7 @@ def chat(body: ChatRequest, request: Request) -> dict[str, Any]:
             allowed = _allow_cloud_request(session_id, client_ip)
             history = _get_cloud_history(session_id) if allowed else []
         except Exception as exc:
-            logger.error("Shared chat storage failed (%s)", type(exc).__name__)
+            log_storage_error(logger, "Postgres chat session/rate-limit", exc)
             detail = (
                 "Database persisten belum dikonfigurasi"
                 if not _database_url()
@@ -330,7 +340,7 @@ def chat(body: ChatRequest, request: Request) -> dict[str, Any]:
         try:
             _save_cloud_history(session_id, list(result.get("history", history))[-HISTORY_LIMIT:])
         except Exception as exc:
-            logger.error("Shared chat history save failed (%s)", type(exc).__name__)
+            log_storage_error(logger, "Postgres chat history save", exc)
             raise HTTPException(status_code=503, detail="Riwayat chat tidak dapat disimpan") from None
     else:
         with _state_lock:
